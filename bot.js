@@ -6,7 +6,7 @@ const app = express();
 app.use(express.json());
 
 // ⚙️ CẤU HÌNH ĐÃ ĐƯỢC TỰ ĐỘNG ĐIỀN
-const BOT_TOKEN = process.env.BOT_TOKEN || "MTU0NDc1NjUyMTM4NzI5NDgzMA.GsJiWJ.VC3CKvgAMOk7SfH4nlR8rxKb9bY23PaXmV38yQ";
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const VIP_CHANNEL_ID = "1544750425880924160"; 
 const PUBLIC_CHANNEL_ID = "1542997364875468870";
 
