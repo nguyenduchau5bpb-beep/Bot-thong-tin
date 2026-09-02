@@ -1,0 +1,12 @@
+{
+  "name": "mrghost-bot",
+  "version": "1.0.0",
+  "main": "bot.js",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "express": "^4.18.2"
+  },
+  "scripts": {
+    "start": "node bot.js"
+  }
+}
