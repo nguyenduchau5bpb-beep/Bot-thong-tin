@@ -1,192 +1,222 @@
+const { 
+    Client, 
+    GatewayIntentBits, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle, 
+    EmbedBuilder, 
+    REST, 
+    Routes, 
+    SlashCommandBuilder, 
+    AttachmentBuilder 
+} = require('discord.js');
 const express = require('express');
-const axios = require('axios');
+
 const app = express();
+app.use(express.json({ limit: '10mb' }));
 
-app.use(express.json());
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
+});
 
-const lastRequestTime = {};
-const gameCache = {};
+// ID 3 Kênh Discord Báo Cáo
+const CHANNELS = {
+    NORMAL: '1542997364875468870', // Kênh báo thường
+    VIP: '1544750425880924160',    // Kênh báo VIP
+    CRITICAL: '1545447777541296241' // Kênh báo khẩn
+};
 
-// Link Discord Webhook mặc định
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL || "https://discord.com/api/webhooks/1545447944009023650/L8Ihhw3Nyfh7c51Pg3Oiw7cH_GyoEL2FwM61mJSNjcbITPUxSZTHY1xJ0mBjkKqo5za7";
+const activeSessions = new Map();
+const pendingCommands = new Map();
 
-// Bộ từ khóa tự động nhận biết Đồ Xịn / Sự Cố Khẩn
-const VALUABLE_KEYWORDS = [
-    "fist of darkness", "chén thánh", "god's chalice", "sweet chalice", "kẹo râu đen",
-    "mirage island", "đảo bí ẩn", "kitsune island", "đảo kitsune", "leviathan",
-    "fist of cold", "haki rainbow", "haki 7 màu", "haki tuyết", "dough king",
-    "rip indra", "tyrant fruit", "fruit spawned", "trái ác quỷ xuất hiện"
-];
+// -------------------------------------------------------------
+// 1. DANG KY SLASH COMMANDS (/)
+// -------------------------------------------------------------
+const commands = [
+    new SlashCommandBuilder().setName('matrix').setDescription('Xem danh sách tài khoản đang kết nối'),
+    new SlashCommandBuilder().setName('hop').setDescription('Yêu cầu tài khoản đổi Server Roblox')
+        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản Roblox').setRequired(true)),
+    new SlashCommandBuilder().setName('screenshot').setDescription('Chụp ảnh màn hình Roblox Realtime')
+        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản Roblox').setRequired(true)),
+    new SlashCommandBuilder().setName('kill').setDescription('Tắt game Roblox khẩn cấp')
+        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản Roblox').setRequired(true))
+].map(cmd => cmd.toJSON());
 
-// Hàm ẩn tên tài khoản (VD: mrghost -> mr*****)
-function maskUsername(username, shouldHide = false) {
-    if (!username) return "N/A";
-    if (!shouldHide) return username;
-    if (username.length <= 2) return username[0] + "*";
-    return username.substring(0, 2) + "*".repeat(username.length - 2);
-}
+client.once('ready', async () => {
+    console.log(`🤖 Bot Overlord đã Online: ${client.user.tag}`);
 
-// Hàm kiểm tra đồ xịn hoặc sự cố khẩn
-function checkValuable(data) {
-    if (data.isValuable || data.isCritical || data.pingAlert) return true;
-    const contentString = JSON.stringify(data).toLowerCase();
-    return VALUABLE_KEYWORDS.some(keyword => contentString.includes(keyword));
-}
-
-// Hàm lấy tên Game và Logo tự động từ Roblox PlaceId
-async function getGameInfo(placeId) {
-    if (!placeId) return { name: "Roblox Game", icon: null };
-    if (gameCache[placeId]) return gameCache[placeId];
-
-    try {
-        const universeRes = await axios.get(`https://apis.roblox.com/universes/v1/places/${placeId}/universe-id`);
-        const universeId = universeRes.data.universeId;
-
-        const gameRes = await axios.get(`https://games.roblox.com/v1/games?universeIds=${universeId}`);
-        const gameName = gameRes.data.data[0].name;
-
-        const thumbRes = await axios.get(`https://thumbnails.roblox.com/v1/games/icons?universeIds=${universeId}&returnPolicy=PlaceHolder&size=150x150&format=Png&isCircular=false`);
-        const gameIcon = thumbRes.data.data[0].imageUrl;
-
-        const result = { name: gameName, icon: gameIcon };
-        gameCache[placeId] = result;
-        return result;
-    } catch (e) {
-        return { name: `Place ID: ${placeId}`, icon: null };
-    }
-}
-
-// Tự động chuyển key sang Tiếng Việt + Emoji
-function formatKey(key) {
-    const customNames = {
-        username: "👤 Tài Khoản",
-        displayName: "📛 Biệt Danh",
-        jobId: "🌐 JobID Server",
-        ping: "📊 Ping",
-        ram: "💾 RAM",
-        status: "📌 Trạng Thái",
-        uptime: "⏱️ TG Hoạt Động",
-        sea: "🗺️ Map / Sea",
-        level: "⭐ Level",
-        currentBeli: "💵 Beli",
-        chestsCollected: "📦 Số Rương",
-        itemFound: "🔥 Đồ Xịn Lụm Được"
-    };
-    return customNames[key] || key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
-}
-
-app.post('/api/report', async (req, res) => {
-    const data = req.body;
-
-    // Chống Spam 3s
-    const userId = data.userId || data.username || "default";
-    const now = Date.now();
-    if (lastRequestTime[userId] && (now - lastRequestTime[userId]) < 3000) {
-        return res.status(429).json({ message: "Request quá nhanh!" });
-    }
-    lastRequestTime[userId] = now;
-
-    const isValuable = checkValuable(data);
-    const isHideName = data.hideName || data.hideUsername || false;
-    const displayUsername = maskUsername(data.username, isHideName);
-
-    const avatarUrl = (data.userId && !isHideName)
-        ? `https://www.roblox.com/headshot-thumbnail/image?userId=${data.userId}&width=420&height=420&format=png`
-        : "https://i.imgur.com/rN9kQoY.png";
-
-    const gameInfo = await getGameInfo(data.placeId);
-
-    const fields = [];
-    for (const [key, value] of Object.entries(data)) {
-        if (
-            ['scriptType', 'eventTitle', 'description', 'customDescription', 'pingAlert', 'isCritical', 'isValuable', 'userId', 'placeId', 'hideName', 'hideUsername'].includes(key) ||
-            value === null || value === undefined || value === ""
-        ) continue;
-
-        let formattedValue = value;
-        if (key === 'username') {
-            formattedValue = `\`${displayUsername}\``;
-        } else if (typeof value === 'number') {
-            formattedValue = `\`${value.toLocaleString()}\``;
-        } else if (key === 'jobId') {
-            formattedValue = `\`\`\`${value}\`\`\``;
-        } else {
-            formattedValue = `\`${value}\``;
+    if (process.env.CLIENT_ID && process.env.BOT_TOKEN) {
+        const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+        try {
+            console.log('🔄 Đang đồng bộ danh sách Slash Commands (/) với Discord...');
+            await rest.put(
+                Routes.applicationCommands(process.env.CLIENT_ID),
+                { body: commands }
+            );
+            console.log('✅ Đã đăng ký thành công toàn bộ Slash Commands!');
+        } catch (err) {
+            console.error('❌ Lỗi đăng ký Slash Commands:', err);
         }
-
-        fields.push({ name: formatKey(key), value: String(formattedValue), inline: key !== 'jobId' });
-    }
-
-    const embed = {
-        author: {
-            name: gameInfo.name,
-            icon_url: gameInfo.icon || "https://i.imgur.com/rN9kQoY.png"
-        },
-        title: isValuable 
-            ? `🚨 [ĐỒ XỊN KHẨN CẤP] ${data.eventTitle || "PHÁT HIỆN MỤC TIÊU GIÁ TRỊ"}` 
-            : `🌐 ${data.eventTitle || "MrGhost System • BÁO CÁO TRẠNG THÁI"}`,
-        description: data.customDescription || data.description || (isValuable 
-            ? "🎉 **ĐÃ PHÁT HIỆN / LỤM ĐƯỢC ĐỒ XỊN!**" 
-            : `Tài khoản **${displayUsername}** vừa gửi báo cáo hệ thống. Bấm các nút bên dưới để lấy dữ liệu.`),
-        color: isValuable ? 0xFF0055 : 0x2B2D31,
-        thumbnail: { url: avatarUrl },
-        fields: fields,
-        footer: { 
-            text: "MrGhost Control System",
-            icon_url: "https://i.imgur.com/rN9kQoY.png"
-        },
-        timestamp: new Date().toISOString()
-    };
-
-    // Dàn Nút Bấm Tương Tác
-    const payload = {
-        username: isValuable ? "🚨 MrGhost Alert Bot" : "MrGhost System Notifier",
-        avatar_url: "https://i.imgur.com/rN9kQoY.png",
-        embeds: [embed],
-        components: [
-            {
-                type: 1,
-                components: [
-                    {
-                        type: 2,
-                        label: "🔑 Copy Job ID",
-                        style: 5,
-                        url: data.jobId ? `https://www.roblox.com/games/${data.placeId || 2753915549}?jobId=${data.jobId}` : "https://www.roblox.com"
-                    },
-                    {
-                        type: 2,
-                        label: "👤 Copy Username",
-                        style: 5,
-                        url: data.userId ? `https://www.roblox.com/users/${data.userId}/profile` : "https://www.roblox.com"
-                    }
-                ]
-            },
-            {
-                type: 1,
-                components: [
-                    {
-                        type: 2,
-                        label: "📊 Xem Stats",
-                        style: 5,
-                        url: data.userId ? `https://www.roblox.com/users/${data.userId}/profile` : "https://www.roblox.com"
-                    }
-                ]
-            }
-        ]
-    };
-
-    if (isValuable) {
-        payload.content = "@everyone 🚨 **ĐÃ PHÁT HIỆN / LỤM ĐƯỢC ĐỒ XỊN!**";
-    }
-
-    try {
-        await axios.post(DISCORD_WEBHOOK_URL, payload);
-        res.status(200).json({ success: true, message: "Report Sent Successfully!" });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
     }
 });
 
+// -------------------------------------------------------------
+// 2. PHÂN LOẠI VÀ GỬI THÔNG BÁO TỚI 3 KÊNH
+// -------------------------------------------------------------
+async function sendMatrixNotification(data) {
+    // Xác định kênh gửi dựa vào Mức Độ Cảnh Báo (alertLevel)
+    let targetChannelId = CHANNELS.NORMAL;
+    let embedColor = 0x3498DB; // Xanh dương (Báo thường)
+
+    if (data.alertLevel === 'CRITICAL') {
+        targetChannelId = CHANNELS.CRITICAL;
+        embedColor = 0xFF0000; // Đỏ (Báo khẩn)
+    } else if (data.alertLevel === 'VIP' || data.screenshotBase64) {
+        targetChannelId = CHANNELS.VIP;
+        embedColor = 0xF1C40F; // Vàng (Báo VIP / Chụp Màn Hình)
+    }
+
+    try {
+        const channel = await client.channels.fetch(targetChannelId);
+        if (!channel) return;
+
+        const embed = new EmbedBuilder()
+            .setTitle(data.eventTitle || '📡 Báo Cáo Hệ Thống Matrix')
+            .setColor(embedColor)
+            .addFields(
+                { name: '👤 Tài khoản', value: `${data.username} (${data.displayName})`, inline: true },
+                { name: '📊 Chỉ số', value: `Level: ${data.level} | FPS: ${data.fps} | Ping: ${data.ping}ms`, inline: true },
+                { name: '🍎 Trái ác quỷ', value: `${data.fruit || 'None'}`, inline: true }
+            )
+            .setTimestamp();
+
+        // Nút bấm tương tác trực tiếp
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`hop_${data.username}`).setLabel('🔄 Hop Server').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`cap_${data.username}`).setLabel('📸 Chụp Ảnh').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`kill_${data.username}`).setLabel('⛔ Kill Game').setStyle(ButtonStyle.Danger)
+        );
+
+        let payloadToSend = { embeds: [embed], components: [row] };
+
+        // Nếu có đính kèm ảnh chụp màn hình
+        if (data.screenshotBase64) {
+            const imageBuffer = Buffer.from(data.screenshotBase64, 'base64');
+            const attachment = new AttachmentBuilder(imageBuffer, { name: 'screenshot.png' });
+            embed.setImage('attachment://screenshot.png');
+            payloadToSend.files = [attachment];
+        }
+
+        // Nếu là báo khẩn -> Tag @everyone
+        if (data.alertLevel === 'CRITICAL') {
+            payloadToSend.content = '🚨 **CẢNH BÁO KHẨN CẤP!** @everyone';
+        }
+
+        await channel.send(payloadToSend);
+    } catch (err) {
+        console.error('❌ Lỗi khi gửi tin nhắn về kênh Discord:', err);
+    }
+}
+
+// -------------------------------------------------------------
+// 3. XỬ LÝ INTERACTION (SLASH COMMANDS & BUTTONS)
+// -------------------------------------------------------------
+client.on('interactionCreate', async (interaction) => {
+    if (interaction.isChatInputCommand()) {
+        const { commandName } = interaction;
+
+        if (commandName === 'matrix') {
+            if (activeSessions.size === 0) {
+                return interaction.reply({ content: '❌ Hiện không có tài khoản Roblox nào đang kết nối!', ephemeral: true });
+            }
+            let msg = '🟢 **DANH SÁCH TÀI KHOẢN ĐANG HOẠT ĐỘNG:**\n';
+            activeSessions.forEach((data, username) => {
+                msg += `• **${username}** | Level: ${data.level} | Ping: ${data.ping}ms | FPS: ${data.fps}\n`;
+            });
+            return interaction.reply({ content: msg, ephemeral: true });
+        }
+
+        const targetUser = interaction.options.getString('username');
+        if (commandName === 'hop') {
+            pendingCommands.set(targetUser, { type: 'FORCE_HOP' });
+            return interaction.reply({ content: `🔄 Đã gửi lệnh **Hop Server** tới **${targetUser}**.` });
+        }
+        if (commandName === 'screenshot') {
+            pendingCommands.set(targetUser, { type: 'TAKE_SCREENSHOT' });
+            return interaction.reply({ content: `📸 Đã gửi yêu cầu **Chụp Ảnh** tới **${targetUser}**.` });
+        }
+        if (commandName === 'kill') {
+            pendingCommands.set(targetUser, { type: 'KILL_GAME' });
+            return interaction.reply({ content: `⛔ Đã gửi lệnh **Tắt Game** tới **${targetUser}**.` });
+        }
+    }
+
+    if (interaction.isButton()) {
+        const [action, username] = interaction.customId.split('_');
+        if (action === 'hop') {
+            pendingCommands.set(username, { type: 'FORCE_HOP' });
+            return interaction.reply({ content: `🔄 Đã gửi lệnh **Hop Server** tới **${username}**.`, ephemeral: true });
+        }
+        if (action === 'cap') {
+            pendingCommands.set(username, { type: 'TAKE_SCREENSHOT' });
+            return interaction.reply({ content: `📸 Đã yêu cầu chụp màn hình **${username}**.`, ephemeral: true });
+        }
+        if (action === 'kill') {
+            pendingCommands.set(username, { type: 'KILL_GAME' });
+            return interaction.reply({ content: `⛔ Đã gửi lệnh **Kill Game** tới **${username}**.`, ephemeral: true });
+        }
+    }
+});
+
+// -------------------------------------------------------------
+// 4. RECEIVE DATA FROM ROBLOX SCRIPT
+// -------------------------------------------------------------
+app.post('/api/matrix', async (res, req) => {
+    // Sửa đúng vị trí req, res
+});
+
+app.post('/api/matrix', async (req, res) => {
+    const data = req.body;
+    if (!data || !data.username) {
+        return res.status(400).json({ error: 'Dữ liệu không hợp lệ!' });
+    }
+
+    // Cập nhật bộ nhớ phiên làm việc
+    activeSessions.set(data.username, {
+        level: data.level,
+        ping: data.ping,
+        fps: data.fps,
+        lastSeen: Date.now()
+    });
+
+    // Chỉ gửi Embed lên Discord khi có Sự kiện, Chụp ảnh, hoặc Báo Khẩn (Tránh spam tin nhắn báo status 3s/lần)
+    if (data.screenshotBase64 || data.alertLevel !== 'NORMAL' || data.eventTitle !== 'Cập Nhật Trạng Thái') {
+        await sendMatrixNotification(data);
+    }
+
+    // Lấy lệnh đang chờ để gửi về cho Roblox
+    const nextCmd = pendingCommands.get(data.username) || null;
+    if (nextCmd) {
+        pendingCommands.delete(data.username);
+    }
+
+    res.status(200).json({
+        status: 'SUCCESS',
+        cmd: nextCmd
+    });
+});
+
+// -------------------------------------------------------------
+// 5. BOOT SERVER
+// -------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server online on port ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`🌐 Matrix Server đang chạy tại Port: ${PORT}`);
+});
+
+client.login(process.env.BOT_TOKEN);
  
