@@ -15,8 +15,9 @@ const client = new Client({
     ]
 });
 
+// Phân luồng kênh thông báo
 const CHANNELS = {
-    NORMAL: '1542997364875468870',
+    NORMAL: process.env.CHANNEL_ID || '1542997364875468870',
     VIP: '1544750425880924160',
     CRITICAL: '1545447777541296241'
 };
@@ -24,7 +25,7 @@ const CHANNELS = {
 const activeSessions = new Map();
 const pendingCommands = new Map();
 
-// --- TẠO SLASH COMMANDS VỚI AUTO-COMPLETE ---
+// Slash Commands có Auto-Complete
 const commands = [
     new SlashCommandBuilder().setName('matrix').setDescription('🌐 Xem trạng thái toàn bộ tài khoản trong ma trận'),
     new SlashCommandBuilder().setName('matrix_all').setDescription('⚡ Phát lệnh đồng loạt tới TOÀN BỘ tài khoản')
@@ -53,22 +54,18 @@ client.once('ready', async () => {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
         try {
             await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
-            console.log('✅ Đã đồng bộ Slash Commands Auto-Complete!');
+            console.log('✅ Đã đồng bộ Slash Commands!');
         } catch (e) { console.error('Lỗi Slash:', e); }
     }
 });
 
-// --- XỬ LÝ GỢI Ý DANH SÁCH ACC TỰ ĐỘNG (AUTO-COMPLETE) ---
+// Xử lý Gợi ý Nick Tự Động & Lệnh Slash
 client.on('interactionCreate', async (interaction) => {
     if (interaction.isAutocomplete()) {
         const focusedValue = interaction.options.getFocused().toLowerCase();
-        // Lấy danh sách nick đang Online thực tế
         const onlineUsers = Array.from(activeSessions.keys());
-        
         const filtered = onlineUsers.filter(user => user.toLowerCase().includes(focusedValue));
-        await interaction.respond(
-            filtered.map(user => ({ name: `🟢 ${user}`, value: user })).slice(0, 25)
-        );
+        await interaction.respond(filtered.map(user => ({ name: `🟢 ${user}`, value: user })).slice(0, 25));
         return;
     }
 
@@ -86,25 +83,19 @@ client.on('interactionCreate', async (interaction) => {
 
         if (commandName === 'matrix_all') {
             const action = interaction.options.getString('action');
-            if (activeSessions.size === 0) return interaction.reply({ content: '❌ Không có tài khoản nào Online để gửi lệnh!', ephemeral: true });
-
+            if (activeSessions.size === 0) return interaction.reply({ content: '❌ Hệ thống đang trống!', ephemeral: true });
             activeSessions.forEach((_, username) => {
                 if (action === 'hop') pendingCommands.set(username, { type: 'FORCE_HOP' });
                 else if (action === 'kill') pendingCommands.set(username, { type: 'KILL_GAME' });
             });
-            return interaction.reply({ content: `⚡ Đã gửi lệnh **${action.toUpperCase()}** tới TOÀN BỘ ${activeSessions.size} tài khoản đang Online!` });
+            return interaction.reply({ content: `⚡ Đã phát lệnh **${action.toUpperCase()}** tới toàn bộ ${activeSessions.size} tài khoản!` });
         }
 
-        // KÍCH HOẠT BỘ KIỂM TRA TÀI KHOẢN ONLINE (CHECK ID)
         const targetUser = interaction.options.getString('username');
         if (!activeSessions.has(targetUser)) {
-            return interaction.reply({ 
-                content: `❌ **LỖI:** Tài khoản \`${targetUser}\` hiện **OFFLINE** hoặc nhập Sai Username! Vui lòng kiểm tra lại.`, 
-                ephemeral: true 
-            });
+            return interaction.reply({ content: `❌ **LỖI:** Tài khoản \`${targetUser}\` hiện **OFFLINE** hoặc nhập sai tên!`, ephemeral: true });
         }
 
-        // NẾU TÀI KHOẢN ĐANG ONLINE -> THỰC THI LỆNH
         if (commandName === 'status') {
             const data = activeSessions.get(targetUser);
             const embed = new EmbedBuilder()
@@ -153,9 +144,7 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isButton()) {
         const [action, username] = interaction.customId.split('_');
-        if (!activeSessions.has(username)) {
-            return interaction.reply({ content: `❌ **LỖI:** Tài khoản \`${username}\` đã Offline!`, ephemeral: true });
-        }
+        if (!activeSessions.has(username)) return interaction.reply({ content: `❌ **LỖI:** Tài khoản \`${username}\` đã Offline!`, ephemeral: true });
         if (action === 'hop') pendingCommands.set(username, { type: 'FORCE_HOP' });
         else if (action === 'cap') pendingCommands.set(username, { type: 'TAKE_SCREENSHOT' });
         else if (action === 'kill') pendingCommands.set(username, { type: 'KILL_GAME' });
@@ -163,18 +152,63 @@ client.on('interactionCreate', async (interaction) => {
     }
 });
 
-// CO CHẾ TỰ ĐỘNG XÓA ACC OFF (TIMEOUT 15 GIÂY)
-setInterval(() => {
+// Giám sát tự động - Báo động khẩn khi Nick bị Crash/Freeze
+setInterval(async () => {
     const now = Date.now();
-    activeSessions.forEach((data, username) => {
-        if (now - data.lastSeen > 15000) { // Quá 15s không gửi nhịp tim -> Coi như Offline
+    activeSessions.forEach(async (data, username) => {
+        if (now - data.lastSeen > 15000) {
             activeSessions.delete(username);
-            console.log(`❌ Account ${username} đã ngắt kết nối.`);
+            try {
+                const channel = await client.channels.fetch(CHANNELS.CRITICAL);
+                if (channel) {
+                    channel.send(`🚨 **CẢNH BÁO KHẨN:** Tài khoản **${username}** bị ngắt kết nối hoặc crash game!`);
+                }
+            } catch (e) { console.error(e); }
         }
     });
 }, 5000);
 
-// RECEIVE TELEMETRY
+// API Receiver
+async function sendNotification(data) {
+    let targetChannel = CHANNELS.NORMAL;
+    let color = 0x3498DB;
+
+    if (data.alertLevel === 'CRITICAL') { targetChannel = CHANNELS.CRITICAL; color = 0xFF0000; }
+    else if (data.alertLevel === 'VIP' || data.screenshotBase64) { targetChannel = CHANNELS.VIP; color = 0xF1C40F; }
+
+    try {
+        const channel = await client.channels.fetch(targetChannel);
+        if (!channel) return;
+
+        const embed = new EmbedBuilder()
+            .setTitle(data.eventTitle || '📡 Báo Cáo Ma Trận')
+            .setColor(color)
+            .addFields(
+                { name: '👤 Nick', value: `${data.username}`, inline: true },
+                { name: '🎮 Place ID', value: `\`${data.placeId}\``, inline: true },
+                { name: '📊 FPS / Ping', value: `${data.fps} FPS / ${data.ping}ms`, inline: true }
+            )
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`hop_${data.username}`).setLabel('🔄 Hop Server').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`cap_${data.username}`).setLabel('📸 Chụp Live').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`kill_${data.username}`).setLabel('⛔ Kill Game').setStyle(ButtonStyle.Danger)
+        );
+
+        let options = { embeds: [embed], components: [row] };
+
+        if (data.screenshotBase64) {
+            const buf = Buffer.from(data.screenshotBase64, 'base64');
+            const file = new AttachmentBuilder(buf, { name: 'screen.png' });
+            embed.setImage('attachment://screen.png');
+            options.files = [file];
+        }
+
+        await channel.send(options);
+    } catch (e) { console.error('Lỗi Send Discord:', e); }
+}
+
 app.post('/api/matrix', async (req, res) => {
     const data = req.body;
     if (!data || !data.username) return res.status(400).json({ error: 'Bad Data' });
@@ -188,12 +222,16 @@ app.post('/api/matrix', async (req, res) => {
         lastSeen: Date.now()
     });
 
+    if (data.screenshotBase64 || data.alertLevel !== 'NORMAL' || data.eventTitle !== 'Cập Nhật Trạng Thái') {
+        await sendNotification(data);
+    }
+
     const nextCmd = pendingCommands.get(data.username) || null;
     if (nextCmd) pendingCommands.delete(data.username);
 
     res.status(200).json({ status: 'SUCCESS', cmd: nextCmd });
 });
 
-app.listen(process.env.PORT || 3000, () => console.log('Matrix Live'));
+app.listen(process.env.PORT || 3000, () => console.log('Matrix System Online'));
 client.login(process.env.BOT_TOKEN);
  
