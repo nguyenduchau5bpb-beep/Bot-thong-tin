@@ -1,237 +1,151 @@
-const { 
-    Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, 
-    EmbedBuilder, REST, Routes, SlashCommandBuilder, AttachmentBuilder 
-} = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const express = require('express');
 
+// =========================================================
+// 1. CẤU HÌNH EXPRESS SERVER (CHỐNG NGỦ RENDER + UPTIMEROBOT)
+// =========================================================
 const app = express();
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '10mb' }));
 
-const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+// Route gốc / giúp UptimeRobot nhận mã 200 OK (Khắc phục lỗi 404/Yêu cầu gói Pro)
+app.get('/', (req, res) => {
+    res.status(200).send("Server Bot Matrix đang hoạt động 24/7!");
 });
 
-// Phân luồng kênh thông báo
-const CHANNELS = {
-    NORMAL: process.env.CHANNEL_ID || '1542997364875468870',
-    VIP: '1544750425880924160',
-    CRITICAL: '1545447777541296241'
-};
+// Lưu trữ danh sách client Roblox kết nối
+let activeClients = new Map();
 
-const activeSessions = new Map();
-const pendingCommands = new Map();
+// Endpoint nhận Heartbeat từ Script Roblox
+app.post('/api/matrix', (req, res) => {
+    const data = req.body;
+    if (!data || !data.userId) {
+        return res.status(400).json({ error: "Thành phần dữ liệu thiếu thông tin!" });
+    }
 
-// Slash Commands có Auto-Complete
+    // Cập nhật thông tin client mới nhất
+    activeClients.set(data.userId.toString(), {
+        ...data,
+        lastSeen: Date.now(),
+        pendingCmd: null // Nơi chứa lệnh chờ gửi xuống Roblox
+    });
+
+    const clientData = activeClients.get(data.userId.toString());
+    
+    // Kiểm tra xem có lệnh chờ từ Discord gửi xuống Roblox không
+    if (clientData && clientData.pendingCmd) {
+        const cmdToSend = clientData.pendingCmd;
+        clientData.pendingCmd = null; // Đã nhận lệnh, xóa lệnh chờ
+        return res.status(200).json({ cmd: { executed: false, ...cmdToSend } });
+    }
+
+    return res.status(200).json({ status: "OK", cmd: { executed: true } });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server Matrix đang lắng nghe tại Cổng ${PORT}`));
+
+// =========================================================
+// 2. CẤU HÌNH DISCORD BOT
+// =========================================================
+const BOT_TOKEN = process.env.DISCORD_TOKEN; // Cấu hình trong Environment Variables của Render
+const CLIENT_ID = process.env.CLIENT_ID;
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+// Đăng ký Slash Command /matrix_all
 const commands = [
-    new SlashCommandBuilder().setName('matrix').setDescription('🌐 Xem trạng thái toàn bộ tài khoản trong ma trận'),
-    new SlashCommandBuilder().setName('matrix_all').setDescription('⚡ Phát lệnh đồng loạt tới TOÀN BỘ tài khoản')
-        .addStringOption(opt => opt.setName('action').setDescription('Hành động (hop, kill)').setRequired(true)),
-    new SlashCommandBuilder().setName('status').setDescription('📊 Xem thông số phần cứng & game')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true)),
-    new SlashCommandBuilder().setName('screenshot').setDescription('📸 Yêu cầu chụp màn hình Live')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true)),
-    new SlashCommandBuilder().setName('hop').setDescription('🔄 Ép tài khoản đổi Server')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true)),
-    new SlashCommandBuilder().setName('hop_low').setDescription('📉 Tìm Server ít người nhất')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true)),
-    new SlashCommandBuilder().setName('say').setDescription('💬 Bắt tài khoản chat trong game')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true))
-        .addStringOption(opt => opt.setName('text').setDescription('Nội dung chat').setRequired(true)),
-    new SlashCommandBuilder().setName('eval').setDescription('⚠️ Chạy code Lua trực tiếp')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true))
-        .addStringOption(opt => opt.setName('code').setDescription('Code Lua').setRequired(true)),
-    new SlashCommandBuilder().setName('kill').setDescription('⛔ Tắt game khẩn cấp')
-        .addStringOption(opt => opt.setName('username').setDescription('Tên tài khoản').setRequired(true).setAutocomplete(true))
+    new SlashCommandBuilder()
+        .setName('matrix_all')
+        .setDescription('Quản lý tất cả tài khoản Roblox Matrix đang chạy')
 ].map(cmd => cmd.toJSON());
 
-client.once('ready', async () => {
-    console.log(`🚀 Overlord Matrix Bot Online: ${client.user.tag}`);
-    if (process.env.CLIENT_ID && process.env.BOT_TOKEN) {
-        const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-        try {
-            await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
-            console.log('✅ Đã đồng bộ Slash Commands!');
-        } catch (e) { console.error('Lỗi Slash:', e); }
-    }
-});
+const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
 
-// Xử lý Gợi ý Nick Tự Động & Lệnh Slash
-client.on('interactionCreate', async (interaction) => {
-    if (interaction.isAutocomplete()) {
-        const focusedValue = interaction.options.getFocused().toLowerCase();
-        const onlineUsers = Array.from(activeSessions.keys());
-        const filtered = onlineUsers.filter(user => user.toLowerCase().includes(focusedValue));
-        await interaction.respond(filtered.map(user => ({ name: `🟢 ${user}`, value: user })).slice(0, 25));
-        return;
-    }
-
-    if (interaction.isChatInputCommand()) {
-        const { commandName } = interaction;
-
-        if (commandName === 'matrix') {
-            if (activeSessions.size === 0) return interaction.reply({ content: '❌ Không có tài khoản nào đang kết nối!', ephemeral: true });
-            let msg = '🌐 **DANH SÁCH TÀI KHOẢN ĐANG ONLINE:**\n';
-            activeSessions.forEach((data, user) => {
-                msg += `• **${user}** | PlaceID: \`${data.placeId}\` | FPS: ${data.fps} | Ping: ${data.ping}ms\n`;
-            });
-            return interaction.reply({ content: msg, ephemeral: true });
-        }
-
-        if (commandName === 'matrix_all') {
-            const action = interaction.options.getString('action');
-            if (activeSessions.size === 0) return interaction.reply({ content: '❌ Hệ thống đang trống!', ephemeral: true });
-            activeSessions.forEach((_, username) => {
-                if (action === 'hop') pendingCommands.set(username, { type: 'FORCE_HOP' });
-                else if (action === 'kill') pendingCommands.set(username, { type: 'KILL_GAME' });
-            });
-            return interaction.reply({ content: `⚡ Đã phát lệnh **${action.toUpperCase()}** tới toàn bộ ${activeSessions.size} tài khoản!` });
-        }
-
-        const targetUser = interaction.options.getString('username');
-        if (!activeSessions.has(targetUser)) {
-            return interaction.reply({ content: `❌ **LỖI:** Tài khoản \`${targetUser}\` hiện **OFFLINE** hoặc nhập sai tên!`, ephemeral: true });
-        }
-
-        if (commandName === 'status') {
-            const data = activeSessions.get(targetUser);
-            const embed = new EmbedBuilder()
-                .setTitle(`📊 Trạng Thái Trực Tuyến: ${targetUser}`)
-                .setColor(0x00FF00)
-                .addFields(
-                    { name: '🎮 Place ID', value: `\`${data.placeId}\``, inline: true },
-                    { name: '🆔 Job ID', value: `\`${data.jobId}\``, inline: true },
-                    { name: '⚡ Hiệu Năng', value: `FPS: ${data.fps} | Ping: ${data.ping}ms | RAM: ${data.ram}MB`, inline: false }
-                );
-            return interaction.reply({ embeds: [embed] });
-        }
-
-        if (commandName === 'screenshot') {
-            pendingCommands.set(targetUser, { type: 'TAKE_SCREENSHOT' });
-            return interaction.reply({ content: `📸 Đã gửi yêu cầu chụp ảnh tới **${targetUser}**.` });
-        }
-
-        if (commandName === 'hop') {
-            pendingCommands.set(targetUser, { type: 'FORCE_HOP' });
-            return interaction.reply({ content: `🔄 Đã gửi lệnh Hop Server tới **${targetUser}**.` });
-        }
-
-        if (commandName === 'hop_low') {
-            pendingCommands.set(targetUser, { type: 'HOP_LOW_SERVER' });
-            return interaction.reply({ content: `📉 Đã gửi lệnh tìm Server ít người cho **${targetUser}**.` });
-        }
-
-        if (commandName === 'say') {
-            const txt = interaction.options.getString('text');
-            pendingCommands.set(targetUser, { type: 'SAY_CHAT', text: txt });
-            return interaction.reply({ content: `💬 Đã ép **${targetUser}** chat: "${txt}"` });
-        }
-
-        if (commandName === 'eval') {
-            const code = interaction.options.getString('code');
-            pendingCommands.set(targetUser, { type: 'EVAL_CODE', code: code });
-            return interaction.reply({ content: `⚠️ Đã truyền tải lệnh Lua tới **${targetUser}**.` });
-        }
-
-        if (commandName === 'kill') {
-            pendingCommands.set(targetUser, { type: 'KILL_GAME' });
-            return interaction.reply({ content: `⛔ Đã gửi lệnh Tắt Game tới **${targetUser}**.` });
-        }
-    }
-
-    if (interaction.isButton()) {
-        const [action, username] = interaction.customId.split('_');
-        if (!activeSessions.has(username)) return interaction.reply({ content: `❌ **LỖI:** Tài khoản \`${username}\` đã Offline!`, ephemeral: true });
-        if (action === 'hop') pendingCommands.set(username, { type: 'FORCE_HOP' });
-        else if (action === 'cap') pendingCommands.set(username, { type: 'TAKE_SCREENSHOT' });
-        else if (action === 'kill') pendingCommands.set(username, { type: 'KILL_GAME' });
-        return interaction.reply({ content: `✅ Đã thực thi thao tác cho **${username}**`, ephemeral: true });
-    }
-});
-
-// Giám sát tự động - Báo động khẩn khi Nick bị Crash/Freeze
-setInterval(async () => {
-    const now = Date.now();
-    activeSessions.forEach(async (data, username) => {
-        if (now - data.lastSeen > 15000) {
-            activeSessions.delete(username);
-            try {
-                const channel = await client.channels.fetch(CHANNELS.CRITICAL);
-                if (channel) {
-                    channel.send(`🚨 **CẢNH BÁO KHẨN:** Tài khoản **${username}** bị ngắt kết nối hoặc crash game!`);
-                }
-            } catch (e) { console.error(e); }
-        }
-    });
-}, 5000);
-
-// API Receiver
-async function sendNotification(data) {
-    let targetChannel = CHANNELS.NORMAL;
-    let color = 0x3498DB;
-
-    if (data.alertLevel === 'CRITICAL') { targetChannel = CHANNELS.CRITICAL; color = 0xFF0000; }
-    else if (data.alertLevel === 'VIP' || data.screenshotBase64) { targetChannel = CHANNELS.VIP; color = 0xF1C40F; }
-
+(async () => {
     try {
-        const channel = await client.channels.fetch(targetChannel);
-        if (!channel) return;
-
-        const embed = new EmbedBuilder()
-            .setTitle(data.eventTitle || '📡 Báo Cáo Ma Trận')
-            .setColor(color)
-            .addFields(
-                { name: '👤 Nick', value: `${data.username}`, inline: true },
-                { name: '🎮 Place ID', value: `\`${data.placeId}\``, inline: true },
-                { name: '📊 FPS / Ping', value: `${data.fps} FPS / ${data.ping}ms`, inline: true }
-            )
-            .setTimestamp();
-
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`hop_${data.username}`).setLabel('🔄 Hop Server').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId(`cap_${data.username}`).setLabel('📸 Chụp Live').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId(`kill_${data.username}`).setLabel('⛔ Kill Game').setStyle(ButtonStyle.Danger)
-        );
-
-        let options = { embeds: [embed], components: [row] };
-
-        if (data.screenshotBase64) {
-            const buf = Buffer.from(data.screenshotBase64, 'base64');
-            const file = new AttachmentBuilder(buf, { name: 'screen.png' });
-            embed.setImage('attachment://screen.png');
-            options.files = [file];
-        }
-
-        await channel.send(options);
-    } catch (e) { console.error('Lỗi Send Discord:', e); }
-}
-
-app.post('/api/matrix', async (req, res) => {
-    const data = req.body;
-    if (!data || !data.username) return res.status(400).json({ error: 'Bad Data' });
-
-    activeSessions.set(data.username, {
-        fps: data.fps,
-        ping: data.ping,
-        ram: data.ram,
-        jobId: data.jobId,
-        placeId: data.placeId,
-        lastSeen: Date.now()
-    });
-
-    if (data.screenshotBase64 || data.alertLevel !== 'NORMAL' || data.eventTitle !== 'Cập Nhật Trạng Thái') {
-        await sendNotification(data);
+        console.log('Đang đăng ký Slash Commands...');
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log('Đã đăng ký lệnh /matrix_all thành công!');
+    } catch (error) {
+        console.error('Lỗi khi đăng ký lệnh:', error);
     }
+})();
 
-    const nextCmd = pendingCommands.get(data.username) || null;
-    if (nextCmd) pendingCommands.delete(data.username);
-
-    res.status(200).json({ status: 'SUCCESS', cmd: nextCmd });
+// Xử lý sự kiện khi Bot sẵn sàng
+client.once('ready', () => {
+    console.log(`🤖 Bot Discord đã đăng nhập dưới tên: ${client.user.tag}`);
 });
 
-app.listen(process.env.PORT || 3000, () => console.log('Matrix System Online'));
-client.login(process.env.BOT_TOKEN);
+// Xử lý tương tác Slash Command & Nút bấm
+client.on('interactionCreate', async (interaction) => {
+    
+    // --- 1. Xử lý lệnh /matrix_all ---
+    if (interaction.isChatInputCommand()) {
+        if (interaction.commandName === 'matrix_all') {
+            // FIX LỖI "ỨNG DỤNG KHÔNG PHẢN HỒI": Hoãn phản hồi ngay lập tức để tránh Timeout 3s
+            await interaction.deferReply();
+
+            // Lọc bỏ các client quá 30 giây không gửi Heartbeat
+            const now = Date.now();
+            for (let [id, clientInfo] of activeClients.entries()) {
+                if (now - clientInfo.lastSeen > 30000) {
+                    activeClients.delete(id);
+                }
+            }
+
+            if (activeClients.size === 0) {
+                return interaction.editReply({ content: '❌ Hiện tại không có tài khoản Roblox nào đang chạy Script Matrix!' });
+            }
+
+            let responseText = "🚨 **DANH SÁCH TÀI KHOẢN MATRIX ONLINE** 🚨\n\n";
+            for (let [id, clientInfo] of activeClients.entries()) {
+                responseText += `👤 **${clientInfo.displayName}** (@${clientInfo.username})\n`;
+                responseText += `🎮 Place ID: \`${clientInfo.placeId}\` | Job ID: \`${clientInfo.jobId.substring(0, 8)}...\`\n`;
+                responseText += `📊 FPS: \`${clientInfo.fps}\` | Ping: \`${clientInfo.ping}ms\` | RAM: \`${clientInfo.ram}MB\`\n-----------------------------------\n`;
+            }
+
+            // Tạo các nút bấm điều khiển
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('cmd_hop_all').setLabel('🔄 Hop Server').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('cmd_snap_all').setLabel('📸 Chụp Live').setStyle(ButtonStyle.Success),
+                new ButtonBuilder().setCustomId('cmd_kill_all').setLabel('⛔ Kill Game').setStyle(ButtonStyle.Danger)
+            );
+
+            await interaction.editReply({ content: responseText, components: [row] });
+        }
+    }
+
+    // --- 2. Xử lý khi bấm nút (Button Interactions) ---
+    if (interaction.isButton()) {
+        // Hoãn phản hồi nút bấm để tránh lỗi timeout
+        await interaction.deferReply({ ephemeral: true });
+
+        const customId = interaction.customId;
+
+        if (activeClients.size === 0) {
+            return interaction.editReply({ content: '❌ Không có client nào khả dụng để thực hiện lệnh!' });
+        }
+
+        if (customId === 'cmd_hop_all') {
+            for (let clientInfo of activeClients.values()) {
+                clientInfo.pendingCmd = { type: 'HOP_LOW_SERVER' };
+            }
+            await interaction.editReply({ content: '✅ Đã gửi lệnh **Hop Server** đến tất cả tài khoản!' });
+
+        } else if (customId === 'cmd_snap_all') {
+            for (let clientInfo of activeClients.values()) {
+                clientInfo.pendingCmd = { type: 'TAKE_SCREENSHOT' };
+            }
+            await interaction.editReply({ content: '✅ Đã gửi yêu cầu **Chụp Ảnh Màn Hình** đến tất cả tài khoản!' });
+
+        } else if (customId === 'cmd_kill_all') {
+            for (let clientInfo of activeClients.values()) {
+                clientInfo.pendingCmd = { type: 'KILL_GAME' };
+            }
+            await interaction.editReply({ content: '⚠️ Đã gửi lệnh **Kill Game (Shutdown)** đến tất cả tài khoản!' });
+        }
+    }
+});
+
+client.login(BOT_TOKEN);
  
